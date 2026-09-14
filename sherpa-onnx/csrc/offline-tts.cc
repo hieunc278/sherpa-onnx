@@ -363,6 +363,16 @@ int32_t OfflineTts::SampleRate() const { return impl_->SampleRate(); }
 
 int32_t OfflineTts::NumSpeakers() const { return impl_->NumSpeakers(); }
 
+bool OfflineTts::SupportsStreaming() const {
+  return impl_->SupportsStreaming();
+}
+
+void OfflineTts::GenerateStreaming(const std::string &text,
+                                   const GenerationConfig &config,
+                                   StreamingAudioCallback callback) const {
+  impl_->GenerateStreaming(text, config, std::move(callback));
+}
+
 #if __ANDROID_API__ >= 9
 template OfflineTts::OfflineTts(AAssetManager *mgr,
                                 const OfflineTtsConfig &config);

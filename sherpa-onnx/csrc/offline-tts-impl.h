@@ -57,6 +57,17 @@ class OfflineTtsImpl {
   // If it supports only a single speaker, then it return 0 or 1.
   virtual int32_t NumSpeakers() const { return 1; }
 
+  // Additive, per spec.md §8 -- new virtuals with safe no-op defaults, so
+  // every existing model is unaffected. Only OfflineTtsZeroTtsImpl
+  // overrides these as of this writing.
+  virtual bool SupportsStreaming() const { return false; }
+
+  virtual void GenerateStreaming(const std::string &text,
+                                 const GenerationConfig &config,
+                                 StreamingAudioCallback callback) const {
+    SHERPA_ONNX_LOGE("This model does not support streaming synthesis");
+  }
+
   std::vector<int64_t> AddBlank(const std::vector<int64_t> &x,
                                 int32_t blank_id = 0) const;
 };

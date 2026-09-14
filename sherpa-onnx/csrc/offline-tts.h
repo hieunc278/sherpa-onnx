@@ -97,6 +97,15 @@ class OfflineTtsImpl;
 using GeneratedAudioCallback = std::function<int32_t(
     const float * /*samples*/, int32_t /*n*/, float /*progress*/)>;
 
+// Additive, model-specific streaming API (spec.md §8): fires per
+// intra-utterance audio chunk as it's produced, unlike
+// GeneratedAudioCallback above (which only fires per-sentence-batch).
+// Returning 0 stops generation early; returning nonzero keeps going.
+// Only models that override OfflineTtsImpl::SupportsStreaming() to return
+// true actually call this -- every other existing model is unaffected.
+using StreamingAudioCallback = std::function<int32_t(
+    const float * /*samples*/, int32_t /*n*/, int32_t /*sample_rate*/)>;
+
 class OfflineTts {
  public:
   ~OfflineTts();
@@ -154,6 +163,20 @@ class OfflineTts {
   // Number of supported speakers.
   // If it supports only a single speaker, then it return 0 or 1.
   int32_t NumSpeakers() const;
+
+  // True if the underlying model supports true intra-utterance streaming
+  // (see StreamingAudioCallback above). False (the default, for every
+  // model except ZeroTTS as of this writing) means GenerateStreaming()
+  // below is not implemented and should not be called.
+  bool SupportsStreaming() const;
+
+  // Streaming synthesis: `callback` is invoked once per audio chunk as it
+  // is produced, not once at the end with the full utterance. See spec.md
+  // §8 for why this needed a new entry point rather than reusing
+  // GeneratedAudioCallback (which only fires per-sentence-batch).
+  void GenerateStreaming(const std::string &text,
+                        const GenerationConfig &config,
+                        StreamingAudioCallback callback) const;
 
  private:
   std::unique_ptr<OfflineTtsImpl> impl_;

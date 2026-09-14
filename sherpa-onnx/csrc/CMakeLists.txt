@@ -864,6 +864,7 @@ if(SHERPA_ONNX_ENABLE_TESTS)
       piper-phonemize-test.cc
       offline-tts-supertonic-unicode-processor-test.cc
       offline-tts-zerotts-model-test.cc
+      offline-tts-zerotts-streaming-test.cc
       offline-tts-zerotts-tokenizer-test.cc
       offline-tts-zerotts-vi-normalizer-test.cc
       offline-tts-zerotts-voice-test.cc

@@ -2,19 +2,25 @@
 //
 // Copyright (c)  2026
 //
-// OfflineTtsZeroTtsImpl -- orchestrates the ZeroTTS pipeline (spec.md §2/§7):
-// text -> tokenizer -> text_encoder (once) -> prefix_step (cold start) ->
-// loop(local_frame_decode -> prefix_step) -> stop condition ->
-// codec_decode_full -> waveform. This file owns the actual autoregressive
-// loop's control flow; OfflineTtsZeroTtsModel (offline-tts-zerotts-model.h)
-// is purely the ONNX I/O binding layer underneath it.
+// OfflineTtsZeroTtsImpl -- orchestrates the ZeroTTS pipeline (spec.md §2/§7/
+// §8): text -> tokenizer -> text_encoder (once) -> prefix_step (cold
+// start) -> loop(local_frame_decode -> prefix_step) -> stop condition ->
+// codec_decode_full (offline) or codec_decode_step per chunk (streaming) ->
+// waveform. This file owns the actual autoregressive loop's control flow
+// (RunArLoop, shared by both Generate and GenerateStreaming so the
+// highest-risk piece of this feature -- the AR loop's stop condition -- is
+// implemented exactly once); OfflineTtsZeroTtsModel
+// (offline-tts-zerotts-model.h) is purely the ONNX I/O binding layer
+// underneath it.
 #ifndef SHERPA_ONNX_CSRC_OFFLINE_TTS_ZEROTTS_IMPL_H_
 #define SHERPA_ONNX_CSRC_OFFLINE_TTS_ZEROTTS_IMPL_H_
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -53,16 +59,133 @@ class OfflineTtsZeroTtsImpl : public OfflineTtsImpl {
 
   int32_t SampleRate() const override { return model_->GetSampleRate(); }
 
+  bool SupportsStreaming() const override { return true; }
+
   GeneratedAudio Generate(
       const std::string &text, const GenerationConfig &config,
       GeneratedAudioCallback callback = nullptr) const override {
+    Ort::MemoryInfo mem =
+        Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    int32_t K = model_->GetNumCodebooks();
+
+    std::vector<int32_t> codes_flat;  // (T_gen, K), row-major -- matches
+                                      // codec_decode_full's (B,T,K) layout
+    RunArLoop(text, mem, [&](const int32_t *codes, int32_t k) {
+      codes_flat.insert(codes_flat.end(), codes, codes + k);
+    });
+
+    int32_t n_frames = static_cast<int32_t>(codes_flat.size()) / K;
+    if (n_frames == 0) {
+      return GeneratedAudio{{}, model_->GetSampleRate()};
+    }
+
+    std::vector<int64_t> audio_codes_shape = {1, n_frames, K};
+    std::vector<int32_t> audio_code_lengths = {n_frames};
+    std::vector<int64_t> lengths_shape = {1};
+
+    std::vector<Ort::Value> codec_out = model_->RunCodecDecodeFull(
+        Ort::Value::CreateTensor<int32_t>(mem, codes_flat.data(),
+                                          codes_flat.size(),
+                                          audio_codes_shape.data(), 3),
+        Ort::Value::CreateTensor<int32_t>(mem, audio_code_lengths.data(), 1,
+                                          lengths_shape.data(), 1));
+
+    GeneratedAudio result;
+    result.sample_rate = model_->GetSampleRate();
+    result.samples = ExtractMonoAudio(codec_out[0], codec_out[1]);
+
+    if (callback) {
+      callback(result.samples.data(),
+               static_cast<int32_t>(result.samples.size()), 1.0f);
+    }
+
+    return result;
+  }
+
+  // Streaming synthesis (spec.md §8): reuses the identical AR loop as
+  // Generate() above (RunArLoop), but instead of accumulating all frames
+  // and calling codec_decode_full once, buffers frames per the doubling
+  // schedule (first_chunk_frames, then x2 up to max_chunk_frames) and
+  // decodes each buffered chunk via codec_decode_step, carrying the
+  // codec's ring-buffer/KV-cache state forward between calls -- mirrors
+  // codec.py's streaming_decoder()/decode_chunk().
+  void GenerateStreaming(const std::string &text,
+                        const GenerationConfig & /*config*/,
+                        StreamingAudioCallback callback) const override {
+    const auto &zc = config_.model.zerotts;
+    Ort::MemoryInfo mem =
+        Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    int32_t K = model_->GetNumCodebooks();
+    int32_t sample_rate = model_->GetSampleRate();
+
+    std::unordered_map<std::string, Ort::Value> state =
+        InitCodecStreamingState(mem);
+
+    std::vector<int32_t> buf_codes;  // (n_buffered, K), row-major
+    int32_t buf_frames = 0;
+    int32_t target = std::max(1, zc.first_chunk_frames);
+    int32_t cap = std::max(target, zc.max_chunk_frames);
+    bool stopped_early = false;
+
+    auto flush = [&]() {
+      if (buf_frames == 0 || stopped_early) return;
+      std::vector<int64_t> shape = {1, buf_frames, K};
+      std::vector<int32_t> lengths = {buf_frames};
+      std::vector<int64_t> len_shape = {1};
+
+      Ort::Value audio_codes = Ort::Value::CreateTensor<int32_t>(
+          mem, buf_codes.data(), buf_codes.size(), shape.data(), 3);
+      Ort::Value audio_lengths = Ort::Value::CreateTensor<int32_t>(
+          mem, lengths.data(), 1, len_shape.data(), 1);
+
+      std::unordered_map<std::string, Ort::Value> result =
+          model_->RunCodecDecodeStep(std::move(audio_codes),
+                                     std::move(audio_lengths),
+                                     std::move(state));
+      Ort::Value audio_chunk = std::move(result.at("audio"));
+      Ort::Value audio_len = std::move(result.at("audio_lengths"));
+      result.erase("audio");
+      result.erase("audio_lengths");
+      state = std::move(result);
+
+      std::vector<float> mono = ExtractMonoAudio(audio_chunk, audio_len);
+      if (callback && !mono.empty()) {
+        int32_t keep_going =
+            callback(mono.data(), static_cast<int32_t>(mono.size()),
+                    sample_rate);
+        if (keep_going == 0) stopped_early = true;
+      }
+
+      buf_codes.clear();
+      buf_frames = 0;
+      target = std::min(cap, target * 2);
+    };
+
+    RunArLoop(text, mem, [&](const int32_t *codes, int32_t k) {
+      if (stopped_early) return;
+      buf_codes.insert(buf_codes.end(), codes, codes + k);
+      ++buf_frames;
+      if (buf_frames >= target) flush();
+    });
+    flush();
+  }
+
+ private:
+  // Runs text_encoder once, then prefix_step (cold start) + the
+  // local_frame_decode/prefix_step AR loop (spec.md §7's stop condition,
+  // ported 1:1 from synthesizer.py's _generate_frames), invoking
+  // `on_frame(codes_ptr, K)` once per *kept* frame (i.e. after the
+  // eoa/tail-frame/max_frames stop-condition checks -- matches
+  // synthesizer.py's `yield codes` placement exactly). Does not touch the
+  // codec at all; that's the caller's job (offline: decode_full once at
+  // the end; streaming: decode_step per buffered chunk).
+  void RunArLoop(
+      const std::string &text, Ort::MemoryInfo &mem,
+      const std::function<void(const int32_t *, int32_t)> &on_frame) const {
     const auto &zc = config_.model.zerotts;
     if (config_.model.debug) {
       SHERPA_ONNX_LOGE("zerotts input text: %s", text.c_str());
     }
-
-    Ort::MemoryInfo mem =
-        Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
 
     int32_t d_model = model_->GetDModel();
     int32_t n_layers = model_->GetNumLayers();
@@ -104,7 +227,6 @@ class OfflineTtsZeroTtsImpl : public OfflineTtsImpl {
     // ---- 3. resolve voice, build external_embed = concat(voice, soa) ---
     const std::vector<float> *voice_emb_ptr = nullptr;
     int32_t V = 0;
-    std::vector<float> loaded_voice_buf;
     if (!zc.voice.empty()) {
       V = loaded_voice_.n_voice_queries;
       voice_emb_ptr = &loaded_voice_.emb;
@@ -177,8 +299,6 @@ class OfflineTtsZeroTtsImpl : public OfflineTtsImpl {
 
     // ---- 4. AR loop: local_frame_decode -> prefix_step -----------------
     std::vector<uint8_t> seen_mask(static_cast<size_t>(K) * codebook_size, 0);
-    std::vector<int32_t> codes_flat;  // (T_gen, K), row-major -- matches
-                                      // codec_decode_full's (B,T,K) layout
     int32_t t = 0;
     bool tail_active = false;
     int32_t tail_left = 0;
@@ -250,7 +370,7 @@ class OfflineTtsZeroTtsImpl : public OfflineTtsImpl {
         break;
       }
 
-      codes_flat.insert(codes_flat.end(), codes.begin(), codes.end());
+      on_frame(codes.data(), K);
 
       if (tail_active) {
         tail_left -= 1;
@@ -300,50 +420,95 @@ class OfflineTtsZeroTtsImpl : public OfflineTtsImpl {
 
       t += 1;
     }
-
-    int32_t n_frames = static_cast<int32_t>(codes_flat.size()) / K;
-    if (n_frames == 0) {
-      return GeneratedAudio{{}, model_->GetSampleRate()};
-    }
-
-    std::vector<int64_t> audio_codes_shape = {1, n_frames, K};
-    std::vector<int32_t> audio_code_lengths = {n_frames};
-    std::vector<int64_t> lengths_shape = {1};
-
-    std::vector<Ort::Value> codec_out = model_->RunCodecDecodeFull(
-        Ort::Value::CreateTensor<int32_t>(mem, codes_flat.data(),
-                                          codes_flat.size(),
-                                          audio_codes_shape.data(), 3),
-        Ort::Value::CreateTensor<int32_t>(mem, audio_code_lengths.data(), 1,
-                                          lengths_shape.data(), 1));
-
-    Ort::Value &audio = codec_out[0];
-    int32_t audio_n = codec_out[1].GetTensorData<int32_t>()[0];
-    auto audio_shape = audio.GetTensorTypeAndShapeInfo().GetShape();
-    int64_t C = audio_shape[1];
-    int64_t audio_length = audio_shape[2];
-    const float *audio_data = audio.GetTensorData<float>();
-
-    GeneratedAudio result;
-    result.sample_rate = model_->GetSampleRate();
-    result.samples.resize(audio_n);
-    for (int32_t i = 0; i < audio_n; ++i) {
-      float sum = 0.f;
-      for (int64_t c = 0; c < C; ++c) {
-        sum += audio_data[c * audio_length + i];
-      }
-      result.samples[i] = sum / static_cast<float>(C);
-    }
-
-    if (callback) {
-      callback(result.samples.data(),
-               static_cast<int32_t>(result.samples.size()), 1.0f);
-    }
-
-    return result;
   }
 
- private:
+  // Averages a (1, C, audio_length) float tensor down to mono, trimmed to
+  // `audio_lengths`'s reported valid length. Shared by Generate() and
+  // GenerateStreaming()'s chunk flushing.
+  static std::vector<float> ExtractMonoAudio(const Ort::Value &audio,
+                                             const Ort::Value &audio_lengths) {
+    int32_t n = audio_lengths.GetTensorData<int32_t>()[0];
+    auto shape = audio.GetTensorTypeAndShapeInfo().GetShape();
+    int64_t C = shape[1];
+    int64_t audio_length = shape[2];
+    const float *data = audio.GetTensorData<float>();
+
+    std::vector<float> mono(n);
+    for (int32_t i = 0; i < n; ++i) {
+      float sum = 0.f;
+      for (int64_t c = 0; c < C; ++c) sum += data[c * audio_length + i];
+      mono[i] = sum / static_cast<float>(C);
+    }
+    return mono;
+  }
+
+  // Zero-initializes the decode_step state map from
+  // codec_browser_onnx_meta.json's declared shapes (see
+  // notes/phase0-codec-decode-step-io.md) -- mirrors codec.py's
+  // MossStreamingDecoder._reset_state(), including the -1 (not 0) fill for
+  // attn_cached_positions_* ("position 0 is a real position").
+  std::unordered_map<std::string, Ort::Value> InitCodecStreamingState(
+      Ort::MemoryInfo &mem) const {
+    const auto &meta = model_->GetCodecStreamingMeta();
+    std::unordered_map<std::string, Ort::Value> state;
+
+    streaming_state_bufs_i32_.clear();
+    streaming_state_bufs_f32_.clear();
+
+    for (const auto &spec : meta.transformer_offsets) {
+      auto buf = std::make_shared<std::vector<int32_t>>(
+          ShapeNumElements(spec.shape), 0);
+      state.emplace(spec.input_name,
+                    Ort::Value::CreateTensor<int32_t>(
+                        mem, buf->data(), buf->size(), spec.shape.data(),
+                        spec.shape.size()));
+      streaming_state_bufs_i32_.push_back(buf);
+    }
+
+    for (const auto &spec : meta.attention_caches) {
+      auto off = std::make_shared<std::vector<int32_t>>(
+          ShapeNumElements(spec.offset_shape), 0);
+      state.emplace(spec.offset_input_name,
+                    Ort::Value::CreateTensor<int32_t>(
+                        mem, off->data(), off->size(), spec.offset_shape.data(),
+                        spec.offset_shape.size()));
+      streaming_state_bufs_i32_.push_back(off);
+
+      auto keys = std::make_shared<std::vector<float>>(
+          ShapeNumElements(spec.cache_shape), 0.f);
+      state.emplace(spec.cached_keys_input_name,
+                    Ort::Value::CreateTensor<float>(
+                        mem, keys->data(), keys->size(),
+                        spec.cache_shape.data(), spec.cache_shape.size()));
+      streaming_state_bufs_f32_.push_back(keys);
+
+      auto values = std::make_shared<std::vector<float>>(
+          ShapeNumElements(spec.cache_shape), 0.f);
+      state.emplace(spec.cached_values_input_name,
+                    Ort::Value::CreateTensor<float>(
+                        mem, values->data(), values->size(),
+                        spec.cache_shape.data(), spec.cache_shape.size()));
+      streaming_state_bufs_f32_.push_back(values);
+
+      auto positions = std::make_shared<std::vector<int32_t>>(
+          ShapeNumElements(spec.positions_shape), -1);
+      state.emplace(spec.cached_positions_input_name,
+                    Ort::Value::CreateTensor<int32_t>(
+                        mem, positions->data(), positions->size(),
+                        spec.positions_shape.data(),
+                        spec.positions_shape.size()));
+      streaming_state_bufs_i32_.push_back(positions);
+    }
+
+    return state;
+  }
+
+  static int64_t ShapeNumElements(const std::vector<int64_t> &shape) {
+    int64_t n = 1;
+    for (auto d : shape) n *= d;
+    return n;
+  }
+
   void PostInit() {
     const auto &zc = config_.model.zerotts;
     if (!ReadZeroTtsNpy(zc.null_voice_emb, &null_voice_emb_)) {
@@ -373,6 +538,15 @@ class OfflineTtsZeroTtsImpl : public OfflineTtsImpl {
   ZeroTtsNpyArray null_voice_emb_;
   OfflineTtsZeroTtsVoice loaded_voice_;
   mutable std::mt19937 rng_;
+
+  // InitCodecStreamingState()'s zero-buffers must outlive the Ort::Value
+  // tensors that view them (CreateTensor doesn't copy); GenerateStreaming()
+  // is const, so these are mutable scratch state, cleared at the start of
+  // each GenerateStreaming() call.
+  mutable std::vector<std::shared_ptr<std::vector<int32_t>>>
+      streaming_state_bufs_i32_;
+  mutable std::vector<std::shared_ptr<std::vector<float>>>
+      streaming_state_bufs_f32_;
 };
 
 }  // namespace sherpa_onnx
