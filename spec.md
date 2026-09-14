@@ -79,6 +79,10 @@ struct OfflineTtsZeroTtsModelConfig {
   std::string local_frame_decode; // local_frame_decode.onnx
   std::string codec_decode_full;  // onnx/codec/moss_audio_tokenizer_decode_full.onnx
   std::string codec_decode_step;  // onnx/codec/moss_audio_tokenizer_decode_step.onnx
+  std::string codec_meta;         // onnx/codec/codec_browser_onnx_meta.json -- added during
+                                   // Phase 2: the decode_step state layout (§12.1) is fully
+                                   // data-driven from this file, so the config needs a path to
+                                   // it (not listed in the original spec draft, corrected here)
   // codec_decode_shared (.data) is resolved implicitly by ORT next to codec_decode_full/step
   std::string tokenizer;          // tokenizer.json
   std::string null_voice_emb;     // null_voice_emb.npy, read via a minimal .npy parser (see §12.4)

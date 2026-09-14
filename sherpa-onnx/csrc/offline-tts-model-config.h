@@ -13,6 +13,7 @@
 #include "sherpa-onnx/csrc/offline-tts-pocket-model-config.h"
 #include "sherpa-onnx/csrc/offline-tts-supertonic-model-config.h"
 #include "sherpa-onnx/csrc/offline-tts-vits-model-config.h"
+#include "sherpa-onnx/csrc/offline-tts-zerotts-model-config.h"
 #include "sherpa-onnx/csrc/offline-tts-zipvoice-model-config.h"
 #include "sherpa-onnx/csrc/parse-options.h"
 
@@ -26,6 +27,7 @@ struct OfflineTtsModelConfig {
   OfflineTtsKittenModelConfig kitten;
   OfflineTtsPocketModelConfig pocket;
   OfflineTtsSupertonicModelConfig supertonic;
+  OfflineTtsZeroTtsModelConfig zerotts;
 
   int32_t num_threads = 1;
   bool debug = false;

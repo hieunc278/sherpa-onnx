@@ -311,6 +311,11 @@ if(SHERPA_ONNX_ENABLE_TTS)
     offline-tts-supertonic-unicode-processor.cc
     offline-tts-vits-model-config.cc
     offline-tts-vits-model.cc
+    offline-tts-zerotts-model-config.cc
+    offline-tts-zerotts-model.cc
+    offline-tts-zerotts-npy.cc
+    offline-tts-zerotts-tokenizer.cc
+    offline-tts-zerotts-voice.cc
     offline-tts-zipvoice-model-config.cc
     offline-tts-zipvoice-model.cc
     offline-tts.cc
@@ -856,6 +861,9 @@ if(SHERPA_ONNX_ENABLE_TESTS)
       sentence-piece-tokenizer-test.cc
       piper-phonemize-test.cc
       offline-tts-supertonic-unicode-processor-test.cc
+      offline-tts-zerotts-model-test.cc
+      offline-tts-zerotts-tokenizer-test.cc
+      offline-tts-zerotts-voice-test.cc
     )
   endif()
 
