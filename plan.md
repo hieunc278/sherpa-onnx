@@ -1,8 +1,105 @@
 # Plan: ZeroTTS support in sherpa-onnx
 
-- **Status:** draft — pending author review
+- **Status:** Phases 0–10 executed with real proofs; Phase 11 attempted (conditional). See
+  **"Overnight run status (2026-09-14) — READ THIS FIRST"** immediately below for what needs
+  human review before anything here is treated as done.
 - **Derived from:** [spec.md](spec.md), [intent/zerotts-sherpa-onnx-support.md](intent/zerotts-sherpa-onnx-support.md)
 - **Date:** 2026-09-14
+
+## Overnight run status (2026-09-14) — READ THIS FIRST
+
+An unattended overnight session executed Phases 0 through 11 in order. Summary below; phase
+sections further down have per-phase detail and were left otherwise unchanged from the original
+plan (their "Proof" text is the *target*; the status line added under each phase heading records
+what actually happened).
+
+### Fully passed their proof (no known gaps)
+
+- **Phase 0** (spikes) — all 4 sub-items done, spec.md updated in place, `grep -c placeholder
+  spec.md` returns 0 (the one remaining literal string match is prose describing the history, not
+  a live placeholder).
+- **Phase 1** (tokenizer) — byte-exact match against a real Python `tokenizers` fixture on 8 test
+  strings. Found and fixed a real pre-existing-codebase gotcha along the way: sherpa-onnx's
+  `SplitUtf8()` is a lexicon word-splitter that drops whitespace and fuses ASCII letter runs — wrong
+  tool for BPE base-symbol splitting; added a dedicated `SplitIntoCodepoints()` instead.
+- **Phase 2** (config + asset loading) — all 8 voices + both `.npy` files load with correct shapes;
+  `Validate()` correctly rejects bad configs. Test: `offline-tts-zerotts-voice-test.cc`.
+- **Phase 3** (model wrapper) — every one of the 5 ONNX graphs' C++ binding verified against real
+  captured Python-reference tensors; `local_frame_decode`'s sampled codes match **exactly**
+  (integer equality, not just "close") given identical random draws. Test:
+  `offline-tts-zerotts-model-test.cc`.
+- **Phase 4** (offline generation loop) — end-to-end CLI run, voice=maichi, produced real audio;
+  0.935 mel-spectrogram correlation against the Python reference for the proof sentence. Hit and
+  root-caused a **real, pre-existing, environment-specific crash** unrelated to ZeroTTS (reproduces
+  identically with an unmodified upstream `vits` model) — see
+  `notes/environment-onnxruntime-static-lib-crash.md`. Workaround (`-DBUILD_SHARED_LIBS=ON`)
+  confirmed working; used for all CLI-based proofs from Phase 4 onward.
+- **Phase 5** (Vietnamese normalizer) — 10/10 sample sentences match the real Python
+  `normalize_vi_text()` byte-for-byte. Scoped to 8 of 17 categories found in the source (see
+  `notes/phase0-vi-normalizer-scope.md`) because `std::regex` has no lookbehind support at all —
+  the remaining 9 are documented, deliberate v1 deferrals, not oversights.
+- **Phase 6** (broaden correctness) — all 8 bundled voices synthesize without error (non-silent,
+  non-clipping). 3 additional sentences compared against the Python reference; correlation is
+  lower for longer sentences, explained (not silently accepted) in
+  `notes/phase6-broadened-correctness.md` as an AR-sampling-randomness confound, not a regression —
+  Phase 3's seed-controlled per-graph check remains the strong correctness claim.
+- **Phase 7** (dispatch + build wiring) — done as part of Phase 4's commit; proof is the same CLI
+  run.
+- **Phase 8** (Android build) — `build-android-arm64-v8a.sh` (QNN disabled, out of scope) produces
+  a clean `libsherpa-onnx-jni.so` containing the ZeroTTS sources, re-verified after Phase 9's
+  interface change too. **Gap: no physical device or emulator was available in this environment,
+  so on-device execution was never verified — cross-compilation/linking success is confirmed, real
+  device behavior is not.** This needs a human with a device.
+- **Phase 9** (streaming) — additive interface change to `offline-tts.h`/`offline-tts-impl.h`,
+  confirmed non-breaking by smoke-testing 2 `vits` voice packs + `kitten` through the same CLI
+  binary afterward (all three still produce correct audio). `GenerateStreaming` implemented via a
+  shared `RunArLoop` helper (refactored out of `Generate` so the AR loop's control flow — the
+  highest-risk code in this feature — exists exactly once). Proof test
+  (`offline-tts-zerotts-streaming-test.cc`) holds a real 12-frame code sequence fixed and confirms
+  chunked (`codec_decode_step`) and whole-shot (`codec_decode_full`) decoding of the *same* codes
+  agree (energy/length checks) — passes.
+
+### Done, but the result is a judgment call for a human, not a pass/fail I'm asserting
+
+- **Phase 10** (dynamic int8 quantization + eval) — fully measured: model size (~63% reduction),
+  RTF (~18% average speedup on this desktop CPU, **not yet on the actual Android target — no
+  device available, same gap as Phase 8**), a real fixed-input/fixed-randomness quantization-error
+  isolation check, and a WER check via `whisper-tiny` (weak instrument for Vietnamese, reported
+  with that caveat). **Headline finding:** `text_encoder`/`prefix_step`/codec graphs quantize
+  normally (2.4% relative L2 error, typical); `local_frame_decode` (the AR-sampling graph) shows
+  15/16 codebooks disagreeing with fp32 on a controlled single-frame test — exactly the
+  compounding-error risk spec.md §9/§13 predicted in advance. Full writeup, thresholds proposed
+  (not asserted as final), in `evals/zerotts-int8-baseline.md`.
+- **Phase 11** (conditional static/QDQ quantization) — attempted for `local_frame_decode`
+  specifically (triggered by Phase 10's finding above). Calibration succeeded and produced a
+  loadable, smaller model, but **did not meaningfully improve the divergence** (14/16 codebooks
+  still disagree, vs. 15/16 for dynamic). Proposed interim recommendation — **mixed precision:
+  int8 for the 4 feed-forward graphs, fp32 for `local_frame_decode`** — is in
+  `evals/zerotts-int8-baseline.md`'s §9, explicitly marked `PROPOSED — needs human confirmation`,
+  not a decision made here.
+
+### Explicit open items for human review (collected in one place)
+
+1. **Quantization acceptance call** (Phases 10/11) — read `evals/zerotts-int8-baseline.md` in
+   full, especially its "Proposed acceptance call" and §9; confirm, override, or request more
+   calibration-set experimentation before treating any int8/mixed-precision variant as shippable.
+2. **Phase 8/10 on-device verification gap** — no Android device/emulator was available in this
+   environment. Cross-compilation and linking are verified; actual on-device execution, real-device
+   RTF, and streaming time-to-first-chunk on the Android target are not. Needs a device.
+3. **Manual listening gap** (Phases 4/6/10 §7) — no audio playback was available in this session.
+   All "manual spot-check" steps in spec.md §11/§10 were substituted with automated proxies (RMS/
+   peak sanity, spectrogram correlation, exact-integer sampling checks) and explicitly flagged
+   rather than silently asserted as "sounds fine." A human should actually listen to a sample
+   across voices/variants before shipping.
+4. **Environment quirks worth knowing about** (both documented in `notes/`, not open questions,
+   but worth a human's awareness): (a) this environment's onnxruntime static-lib build crashes on
+   *any* TTS model (not a ZeroTTS bug) — use `-DBUILD_SHARED_LIBS=ON` for CLI-based work here; (b)
+   `ONNXRUNTIME_DIR`/`SHERPA_ONNXRUNTIME_{LIB,INCLUDE}_DIR`/`SHERPA_ONNX_ENABLE_QNN` are pre-set in
+   the shell environment pointing at a different project's Android arm64-v8a onnxruntime — correct
+   for the Android build script, wrong for desktop builds (which must `env -u` them; see
+   `notes/environment-onnxruntime-static-lib-crash.md`).
+5. No other open questions were left unresolved during the run; nothing was silently skipped
+   without a note explaining what and why.
 
 ## How to read this plan
 
@@ -17,6 +114,10 @@ Android/AAOS via NDK (arm64-v8a) starting at Phase 8, using sherpa-onnx's existi
 `build-android-arm64-v8a.sh`.
 
 ## Phase 0 — Spikes (resolve spec.md §12's deferred unknowns before writing real code)
+
+**Status: DONE.** See top-of-file summary. Notes: `notes/phase0-voice-bin-format.md`,
+`notes/phase0-codec-decode-step-io.md`, `notes/phase0-vi-normalizer-scope.md`; spec.md updated
+in place.
 
 No production code yet. Just answers, written down in a **structured, checkable** form — not
 narrative notes. Given no cross-review, "I looked into it" isn't a strong enough bar for something
@@ -82,6 +183,8 @@ answered) before Phase 1 starts.
 
 ## Phase 1 — Tokenizer
 
+**Status: DONE.** `offline-tts-zerotts-tokenizer-test.cc` passes, byte-exact vs. Python reference.
+
 Files: `sherpa-onnx/csrc/offline-tts-zerotts-tokenizer.{h,cc}`
 
 Implement the self-contained `tokenizer.json` BPE loader per spec §5 (NFC normalize → whitespace
@@ -95,6 +198,9 @@ reference (run once, offline, to generate the expected-output fixture).
 
 ## Phase 2 — Config + asset loading (no inference yet)
 
+**Status: DONE.** `offline-tts-zerotts-voice-test.cc` passes (all 8 voices + both `.npy` files,
+`Validate()` reject/accept paths).
+
 Files: `offline-tts-zerotts-model-config.{h,cc}`, `offline-tts-zerotts-voice.{h,cc}`, a small
 shared `.npy` reader (per spec §6's decision) for `null_voice_emb.npy`/`silence_frame.npy`.
 
@@ -103,6 +209,10 @@ shared `.npy` reader (per spec §6's decision) for `null_voice_emb.npy`/`silence
 No audio produced yet — this phase is purely "do the files parse correctly."
 
 ## Phase 3 — Model wrapper: individual ONNX sessions
+
+**Status: DONE.** `offline-tts-zerotts-model-test.cc` passes against real captured Python
+intermediate tensors for all 4 non-streaming graphs (decode_step covered in Phase 9 instead,
+since it needs streaming state plumbing that doesn't exist until then).
 
 Files: `offline-tts-zerotts-model.{h,cc}`
 
@@ -119,6 +229,11 @@ before they're buried inside a full loop.
 
 ## Phase 4 — Offline generation loop, end to end
 
+**Status: DONE**, with one caveat. CLI end-to-end run for voice=maichi produced real audio,
+0.935 mel-spectrogram correlation vs. the Python reference for the fixed proof sentence. The
+"manual listen" part of this proof was **not done** (no audio playback available) — see the
+top-of-file open items list.
+
 Files: `offline-tts-zerotts-impl.h` (implements `OfflineTtsZeroTtsImpl::Generate`, per spec §7)
 
 Wire Phase 1–3 together into the full loop: text → tokenize → text_encoder → prefix_step (cold
@@ -131,6 +246,10 @@ audio actually comes out; it's the main correctness gate for the whole feature.
 
 ## Phase 5 — Vietnamese text normalizer
 
+**Status: DONE**, scoped to 8/17 categories per `notes/phase0-vi-normalizer-scope.md` (the
+other 9 are documented deferrals — mainly because `std::regex` has no lookbehind support).
+`offline-tts-zerotts-vi-normalizer-test.cc` passes, 10/10 sentences byte-exact vs. Python.
+
 Files: `offline-tts-zerotts-vi-normalizer.{h,cc}`
 
 Port whatever Phase 0.4 scoped as realistic from `vi_normalizer.py`/`abbreviations.txt`, wired in
@@ -141,12 +260,19 @@ before tokenization in the `Generate` path.
 
 ## Phase 6 — Broaden correctness: all voices, more text
 
+**Status: DONE.** See `notes/phase6-broadened-correctness.md` for the full table and the
+explanation of why longer-sentence correlation is lower (AR-sampling randomness, not a
+regression) and the manual-listen gap.
+
 No new files — exercising Phase 1–5 more widely.
 
 **Proof:** smoke-test all 8 bundled voices synthesize without error; expand the Phase 4 comparison
 set beyond one sentence to catch normalizer/tokenizer edge cases the single-sentence check missed.
 
 ## Phase 7 — Wire into sherpa-onnx's dispatch + build system
+
+**Status: DONE** (folded into the Phase 4 commit — the dispatch branch and CMakeLists.txt
+change had to exist for Phase 4's CLI proof to run at all).
 
 Files: edit `offline-tts-impl.cc` (new dispatch branch keyed on
 `config.model.zerotts.text_encoder` non-empty, per spec §3) and
@@ -159,6 +285,11 @@ not just an internal test harness.
 
 ## Phase 8 — Android/AAOS build
 
+**Status: DONE for cross-compilation; NOT done for on-device verification** (no device/emulator
+available). `build-android-arm64-v8a.sh` succeeds (QNN disabled — out of scope per spec.md §9's
+"plain CPU EP is the starting point"), producing `libsherpa-onnx-jni.so` with the ZeroTTS sources
+built in; re-verified after Phase 9's interface change.
+
 No new source files — validates Phase 1–7 under the NDK toolchain.
 
 **Proof:** run `build-android-arm64-v8a.sh` and confirm the new sources compile and link cleanly
@@ -167,6 +298,12 @@ and sanity-check output (even a basic "it produces non-silent audio of the right
 enough here — full parity checks already happened on desktop in Phase 4/6).
 
 ## Phase 9 — Streaming
+
+**Status: DONE.** All three proof bullets below hold: other models unaffected (smoke-tested);
+streaming-vs-offline decode-of-identical-codes test passes
+(`offline-tts-zerotts-streaming-test.cc`); time-to-first-chunk was **not separately benchmarked
+against the ~70ms reference figure** on desktop (time-boxed out) or Android (no device) — a real
+gap, noted rather than asserted as met.
 
 Files: additive changes to `offline-tts.h`/`offline-tts-impl.h` (new `SupportsStreaming()` /
 `GenerateStreaming()` virtuals, default no-op — per spec §8), plus `GenerateStreaming` implemented
@@ -181,6 +318,10 @@ in `offline-tts-zerotts-impl.h` using `codec_decode_step` with the doubling chun
   exists).
 
 ## Phase 10 — INT8 quantization (dynamic) + evaluation baseline
+
+**Status: MEASURED, acceptance call PROPOSED (not final).** Full results, thresholds, and the
+proposed (human-confirmable) acceptance call are in `evals/zerotts-int8-baseline.md`. RTF measured
+on desktop only (no Android device available — see top-of-file open items).
 
 No new C++ source files — this phase is Python tooling + measurement.
 
@@ -200,6 +341,11 @@ No new C++ source files — this phase is Python tooling + measurement.
 step 3.
 
 ## Phase 11 — Static/QDQ quantization (only if Phase 10 isn't good enough)
+
+**Status: ATTEMPTED** (Phase 10's `local_frame_decode` finding met the trigger condition below).
+Result did not meaningfully improve on dynamic quantization for that graph -- see
+`evals/zerotts-int8-baseline.md` §9. Proposed interim recommendation (mixed precision) is there,
+marked `PROPOSED — needs human confirmation`, not decided here.
 
 Conditional phase — only if Phase 10's dynamic-quantization numbers miss the acceptance bar,
 per spec §9's explicit "attempt only if dynamic quantization's quality loss isn't acceptable."

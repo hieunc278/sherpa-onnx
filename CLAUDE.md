@@ -41,6 +41,21 @@ make -j$(nproc)
   no per-model build flag. Adding ZeroTTS support means adding its `.cc` files to the existing TTS
   source list in `sherpa-onnx/csrc/CMakeLists.txt` (near the Kitten/Supertonic/Zipvoice entries,
   ~line 299–315), not introducing a new option.
+- **Known environment issue (this sandbox specifically):** the plain static-lib onnxruntime build
+  crashes (`free(): invalid pointer`, inside ORT's own device-discovery code) the first time *any*
+  TTS model — not just ZeroTTS — actually runs through the CLI. Confirmed pre-existing, unrelated
+  to this fork's code (reproduces with an unmodified upstream `vits` model too). Workaround: add
+  `-DBUILD_SHARED_LIBS=ON` to the `cmake` invocation and set `LD_LIBRARY_PATH` to wherever
+  `libonnxruntime.so` ends up before running any CLI binary. See
+  `notes/environment-onnxruntime-static-lib-crash.md` for the full reproduction and root-cause
+  notes. gtest binaries (`ctest`) are unaffected and work fine with the plain static build.
+- Also in this sandbox: `ONNXRUNTIME_DIR`, `SHERPA_ONNXRUNTIME_LIB_DIR`,
+  `SHERPA_ONNXRUNTIME_INCLUDE_DIR`, and `SHERPA_ONNX_ENABLE_QNN` are pre-set in the shell
+  environment, pointing at a **different project's** Android arm64-v8a onnxruntime — correct for
+  `build-android-arm64-v8a.sh` below, wrong for desktop builds. Desktop `cmake`/`make` invocations
+  need `env -u ONNXRUNTIME_DIR -u SHERPA_ONNXRUNTIME_LIB_DIR -u SHERPA_ONNXRUNTIME_INCLUDE_DIR -u
+  SHERPA_ONNX_ENABLE_QNN` or they'll pick up the wrong (cross-compiled) onnxruntime and fail to
+  link.
 
 Android/AAOS build (plan.md Phase 8 onward), via the repo's existing NDK scripts — requires
 `ANDROID_NDK` set:
