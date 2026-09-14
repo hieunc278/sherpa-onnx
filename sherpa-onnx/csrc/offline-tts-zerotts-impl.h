@@ -25,6 +25,7 @@
 #include "sherpa-onnx/csrc/offline-tts-zerotts-model.h"
 #include "sherpa-onnx/csrc/offline-tts-zerotts-npy.h"
 #include "sherpa-onnx/csrc/offline-tts-zerotts-tokenizer.h"
+#include "sherpa-onnx/csrc/offline-tts-zerotts-vi-normalizer.h"
 #include "sherpa-onnx/csrc/offline-tts-zerotts-voice.h"
 #include "sherpa-onnx/csrc/onnx-utils.h"
 
@@ -70,8 +71,13 @@ class OfflineTtsZeroTtsImpl : public OfflineTtsImpl {
     int32_t K = model_->GetNumCodebooks();
     int32_t codebook_size = model_->GetCodebookSize();
 
-    // ---- 1. tokenize --------------------------------------------------
-    std::vector<int32_t> ids32 = tokenizer_.Encode(text);
+    // ---- 1. normalize (numbers/dates/times/abbreviations -> spoken
+    //         Vietnamese, see spec.md §5/Phase 5) then tokenize ------------
+    std::string normalized_text = NormalizeViText(text);
+    if (config_.model.debug) {
+      SHERPA_ONNX_LOGE("zerotts normalized text: %s", normalized_text.c_str());
+    }
+    std::vector<int32_t> ids32 = tokenizer_.Encode(normalized_text);
     std::vector<int64_t> text_ids(ids32.begin(), ids32.end());
     int32_t L = static_cast<int32_t>(text_ids.size());
     std::vector<int64_t> txt_lengths = {L};

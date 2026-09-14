@@ -316,6 +316,7 @@ if(SHERPA_ONNX_ENABLE_TTS)
     offline-tts-zerotts-nfc.cc
     offline-tts-zerotts-npy.cc
     offline-tts-zerotts-tokenizer.cc
+    offline-tts-zerotts-vi-normalizer.cc
     offline-tts-zerotts-voice.cc
     offline-tts-zipvoice-model-config.cc
     offline-tts-zipvoice-model.cc
@@ -864,6 +865,7 @@ if(SHERPA_ONNX_ENABLE_TESTS)
       offline-tts-supertonic-unicode-processor-test.cc
       offline-tts-zerotts-model-test.cc
       offline-tts-zerotts-tokenizer-test.cc
+      offline-tts-zerotts-vi-normalizer-test.cc
       offline-tts-zerotts-voice-test.cc
     )
   endif()
