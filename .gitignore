@@ -145,7 +145,12 @@ README-DEV.txt
 sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02
 dict
 *.npz
+*.npy
 voices.bin
+voice.bin
+
+# ZeroTTS model assets downloaded from Hugging Face (weights, voices, tokenizer) -- not committed
+assets/zerotts/
 kitten-nano-en-v0_1-fp16
 *.egg-info
 *.jar
