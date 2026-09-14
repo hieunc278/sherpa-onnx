@@ -313,6 +313,7 @@ if(SHERPA_ONNX_ENABLE_TTS)
     offline-tts-vits-model.cc
     offline-tts-zerotts-model-config.cc
     offline-tts-zerotts-model.cc
+    offline-tts-zerotts-nfc.cc
     offline-tts-zerotts-npy.cc
     offline-tts-zerotts-tokenizer.cc
     offline-tts-zerotts-voice.cc
