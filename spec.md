@@ -81,26 +81,31 @@ struct OfflineTtsZeroTtsModelConfig {
   std::string codec_decode_step;  // onnx/codec/moss_audio_tokenizer_decode_step.onnx
   // codec_decode_shared (.data) is resolved implicitly by ORT next to codec_decode_full/step
   std::string tokenizer;          // tokenizer.json
-  std::string null_voice_emb;     // null_voice_emb.npy -> re-exported as .bin, or parsed as .npy (see open question)
-  std::string silence_frame;      // silence_frame.npy -> same as above
+  std::string null_voice_emb;     // null_voice_emb.npy, read via a minimal .npy parser (see §12.4)
+  std::string silence_frame;      // silence_frame.npy, read via the same minimal .npy parser
   std::string voice;              // path to a voices/<name>/ dir (voice.bin + meta.json)
   int32_t num_threads = 1;
   bool debug = false;
   std::string provider = "cpu";
 
-  // Generation defaults -- exact values to be pulled from synthesizer.py's
-  // function signature during implementation (see §8, open question)
-  int32_t max_frames = 1500;
-  int32_t eoa_extra_frames = 0;   // placeholder, confirm real default
-  float temperature = 1.0f;       // placeholder, confirm real default
-  int32_t top_k = 0;              // placeholder
-  float top_p = 1.0f;             // placeholder
-  float repetition_penalty = 1.0f;// placeholder
-  float cfg_scale = 1.0f;         // placeholder
+  // Generation defaults -- confirmed against synthesizer.py's ZeroTTS.synthesize()/
+  // synthesize_stream() default keyword arguments (Phase 0.3 spike, 2026-09-14).
+  int32_t min_frames = 4;              // synthesizer.py: synthesize(min_frames=4)
+  int32_t max_frames = 1500;           // synthesizer.py: DEFAULT_MAX_FRAMES = 1500
+  int32_t eoa_extra_frames = 1;        // synthesizer.py: synthesize(eoa_extra_frames=1)
+  float text_temperature = 1.0f;       // synthesizer.py: synthesize(text_temperature=1.0)
+  int32_t text_topk = 50;              // synthesizer.py: synthesize(text_topk=50)
+  float audio_temperature = 0.8f;      // synthesizer.py: synthesize(audio_temperature=0.8)
+  int32_t audio_topk = 25;             // synthesizer.py: synthesize(audio_topk=25)
+  float audio_topp = 0.95f;            // synthesizer.py: synthesize(audio_topp=0.95)
+  float audio_repetition_penalty = 1.2f;  // synthesizer.py: synthesize(audio_repetition_penalty=1.2)
+  float cfg_scale = 1.0f;              // synthesizer.py: synthesize(cfg_scale=1.0) -- >1.0 doubles
+                                        // per-frame cost (adds an unconditional CFG branch); not
+                                        // used by default.
 
-  // Streaming-specific
-  int32_t first_chunk_frames = 4; // placeholder, confirm real default
-  int32_t max_chunk_frames = 32;  // placeholder, confirm real default
+  // Streaming-specific -- confirmed against synthesizer.py's synthesize_stream() defaults.
+  int32_t first_chunk_frames = 1;      // synthesizer.py: synthesize_stream(first_chunk_frames=1)
+  int32_t max_chunk_frames = 16;       // synthesizer.py: synthesize_stream(max_chunk_frames=16)
 };
 ```
 
@@ -135,9 +140,13 @@ in C++ means depending on a zip library plus NumPy's header format. ZeroTTS's ow
 ships `voice.bin` per voice pack, documented in its source as "raw f32 of voice_emb, for the JS
 demo" — unused by Python, but exactly the format we want: a flat float32 buffer we can read
 directly. **Decision: use `voice.bin` + `meta.json` (for `n_voice_queries`/display metadata), skip
-`.npz` entirely.** Exact byte layout (any header vs. pure raw floats, and how shape is
-recovered) needs to be confirmed against one real `voice.bin` file during `plan.md`/implementation
-— treat as a spike, not an assumption to build on blindly.
+`.npz` entirely.**
+
+**Confirmed (Phase 0.1 spike, see `notes/phase0-voice-bin-format.md`):** `voice.bin` is raw
+float32, little-endian, row-major, **no header at all** — verified by exact size match
+(`n_voice_queries * d_model * 4 == file_size_bytes`, 30720 == 30720 for `voices/maichi/`) and by
+bit-exact numerical agreement against the reference `.npz`'s `voice_emb` array over its full
+contents, not just a size coincidence.
 
 `null_voice_emb.npy` and `silence_frame.npy` are plain NumPy `.npy` files (not `.npz`) — still need
 either a minimal `.npy` header parser (simpler than full npz: fixed magic + shape/dtype header +
@@ -260,25 +269,43 @@ comparison could hide compounding error that only shows up on longer utterances.
 - This all runs as manual `make test`-style targets for now, consistent with the intent's
   "no CI/CD yet" constraint — but structured so wiring them into CI later is mechanical.
 
-## 12. Design decisions deferred to `plan.md` (need implementation-time investigation, not blocking the spec)
+## 12. Design decisions deferred to `plan.md` (resolved during Phase 0, 2026-09-14 — kept here as a record)
 
-1. **`decode_step` exact tensor names/shapes for the KV-cache/ring-buffer state** — `codec.py`
-   resolves these dynamically from `codec_browser_onnx_meta.json`; need to actually inspect that
-   file's contents (not just the code that reads it) once implementation starts.
-2. **Exact default sampling hyperparameters** (`max_frames`, `eoa_extra_frames`, `temperature`,
-   `top_k`, `top_p`, `repetition_penalty`, `cfg_scale`, `first_chunk_frames`, `max_chunk_frames`) —
-   placeholders in §4 need to be replaced with the real defaults read directly off
-   `synthesizer.py`'s function signatures.
-3. **`voice.bin` byte layout** — confirm header-vs-raw-floats and shape recovery against a real
-   file before writing the parser.
-4. **`.npy` reader scope** — minimal parser vs. one-time data conversion for `null_voice_emb.npy`
-   and `silence_frame.npy`.
-5. **Vietnamese normalizer port fidelity** — `vi_normalizer.py` + `abbreviations.txt` is a
-   nontrivial, data-driven module; `plan.md` should scope exactly how much of it is ported
-   vs. simplified for a first pass.
+1. ~~`decode_step` exact tensor names/shapes~~ — **resolved:** fully data-driven from
+   `codec_browser_onnx_meta.json`'s `streaming_decode` section (108 tensors: 4 data + 8
+   transformer-offset + 96 attention-cache, all confirmed against the live ONNX graph and
+   cross-referenced against `codec.py`'s dynamic name resolution). See
+   `notes/phase0-codec-decode-step-io.md`. The C++ model wrapper parses this JSON at load time
+   rather than hardcoding tensor names/shapes — same approach the Python reference itself uses.
+2. ~~Exact default sampling hyperparameters~~ — **resolved:** §4's config struct now carries the
+   real defaults read off `synthesizer.py`'s `synthesize()`/`synthesize_stream()` signatures, each
+   annotated with its source line. One correction along the way: the original placeholder schema
+   conflated a single `temperature`/`top_k`/`top_p`/`repetition_penalty` — the real model has
+   **two independent pairs** (`text_temperature`/`text_topk` for the control channel,
+   `audio_temperature`/`audio_topk`/`audio_topp`/`audio_repetition_penalty` for the codebooks); §4
+   has been corrected to match.
+3. ~~`voice.bin` byte layout~~ — **resolved:** raw float32, little-endian, row-major, no header —
+   confirmed by exact size match and bit-exact agreement against the reference `.npz`. See
+   `notes/phase0-voice-bin-format.md`.
+4. ~~`.npy` reader scope~~ — **resolved: minimal parser, not offline conversion.** Both
+   `null_voice_emb.npy` (`<f4`, shape `(1, 10, 768)`) and `silence_frame.npy` (`<i8`, shape
+   `(1, 16)`) use the standard NumPy v1.0 `.npy` header (`\x93NUMPY` magic + version + a
+   Python-dict-literal header line padded to a 64-byte boundary, then raw data) — confirmed by
+   inspecting the real files' header bytes. A ~30-line reader supporting exactly these two dtypes
+   (no full NumPy format generality needed) is simpler and more maintainable than a one-time
+   conversion step that would need re-running if the upstream files ever change.
+5. ~~Vietnamese normalizer port fidelity~~ — **resolved:** scoped to 8 of 17 categories found in
+   `vi_normalizer.py` for v1 (numbers, percent, time, date, month-year, abbreviations, fractions,
+   `@`-sign, plus URL/email protection as a prerequisite guard), deferring 9 lower-value/niche
+   categories, each with a documented reason. Key finding: `vi_normalizer.py`'s scanner regex
+   depends heavily on **negative lookbehind assertions, which C++ `std::regex` does not support at
+   all** — v1 ports the guard logic as manual character checks around lookbehind-free regexes
+   rather than a direct regex-for-regex port. See `notes/phase0-vi-normalizer-scope.md` for the
+   full per-category table.
 6. ~~Target edge device profile~~ — **resolved: Android/AAOS via NDK, arm64-v8a primary** (see §9).
-7. **Quantization acceptance thresholds** (WER delta, quality-metric delta) — need a real fp32
-   baseline measurement first before numbers can be set, per §10.
+7. **Quantization acceptance thresholds** (WER delta, quality-metric delta) — still deferred; needs
+   a real fp32 baseline measurement first before numbers can be set, per §10. Not resolvable during
+   Phase 0 since it requires the full pipeline (Phases 1–9) to exist first.
 
 ## 13. Risks
 
