@@ -33,6 +33,11 @@ pattern used by other TTS models in the codebase (e.g. Kitten, Supertonic, Zipvo
   for `spec.md` — see open questions.
 - A minimal C++-level example/test that synthesizes Vietnamese text with a bundled voice and
   produces audio comparable to the reference Python implementation, in both modes
+- **An int8-quantized variant of the model graphs**, in addition to the original fp32 graphs, so
+  this can be deployed on-edge (CPU-constrained devices) rather than only on a full workstation/server
+- **A defined evaluation method comparing quality/performance before vs. after quantization**, so
+  "it still sounds fine and it's faster/smaller" is measured, not just assumed — see success
+  criteria and `spec.md` for the actual methodology
 
 This is being built as a **private fork** of sherpa-onnx, with remote origin at
 `https://github.com/hieunc278/sherpa-onnx`. It is not intended as an upstream contribution to
@@ -80,6 +85,10 @@ This is being built as a **private fork** of sherpa-onnx, with remote origin at
   assets), not embedded at build time or downloaded automatically.
 - **Repo setup:** private fork of `k2-fsa/sherpa-onnx`, remote origin
   `https://github.com/hieunc278/sherpa-onnx`.
+- **Edge deployment target: Android and Android Automotive OS (AAOS), built via the Android NDK**
+  (arm64-v8a primary). sherpa-onnx already ships Android NDK build scripts
+  (`build-android-arm64-v8a.sh` etc.) at the repo root — no new build infrastructure needed, just
+  making sure the new ZeroTTS sources build cleanly under that existing path.
 - **Solo project, no CI/CD yet, no cross-review.** Verification of correctness (matching the
   reference Python implementation's output) is on me; see `plan.md`/testing approach in later
   stages for how self-verification will work without a second reviewer.
@@ -98,6 +107,12 @@ This is being built as a **private fork** of sherpa-onnx, with remote origin at
 - Builds and runs as a standard sherpa-onnx C++ TTS backend (i.e., selectable via the same
   config-field-presence dispatch pattern as other models), without modifying unrelated parts of
   sherpa-onnx.
+- An int8-quantized set of graphs exists and loads/runs correctly through the same C++ backend
+  (fp32 and int8 selectable via config, not separate code paths).
+- Quality and performance are measured **before and after quantization** against the same fixed
+  test set (text + voice combinations), with explicit before/after numbers for: perceptual/objective
+  audio quality, intelligibility, latency (RTF), and model size — not just a subjective "sounds
+  okay" check.
 
 ## Open questions
 
@@ -112,3 +127,8 @@ This is being built as a **private fork** of sherpa-onnx, with remote origin at
    the right place to hook ZeroTTS's `tokenizer.json` into, vs. writing a new loader — to be
    resolved in `spec.md` after looking at how other HF-`tokenizers`-based models (if any) are
    handled in sherpa-onnx today.
+4. ~~Target edge device profile~~ — **resolved: Android/AAOS via NDK, arm64-v8a primary.**
+5. **Quantization approach and calibration data.** Dynamic (weight-only) int8 quantization is the
+   simplest starting point and needs no calibration set; static/QDQ quantization can be more
+   accurate but needs representative Vietnamese text/audio to calibrate against. Which one (or
+   both, compared against each other) is decided in `spec.md`.
