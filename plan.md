@@ -80,12 +80,26 @@ what actually happened).
 
 ### Explicit open items for human review (collected in one place)
 
-1. **Quantization acceptance call** (Phases 10/11) — read `evals/zerotts-int8-baseline.md` in
-   full, especially its "Proposed acceptance call" and §9; confirm, override, or request more
-   calibration-set experimentation before treating any int8/mixed-precision variant as shippable.
-2. **Phase 8/10 on-device verification gap** — no Android device/emulator was available in this
-   environment. Cross-compilation and linking are verified; actual on-device execution, real-device
-   RTF, and streaming time-to-first-chunk on the Android target are not. Needs a device.
+1. ~~Quantization acceptance call~~ — **RESOLVED 2026-09-15.** Approved as proposed: mixed
+   precision (int8 for `text_encoder`/`prefix_step`/both codec decoders, fp32 for
+   `local_frame_decode`). See `evals/zerotts-int8-baseline.md`'s "Acceptance call" section.
+2. **Phase 8/10 on-device verification — DONE (2026-09-15), on a real Pixel 6 Pro (`raven`).**
+   Rebuilt `sherpa-onnx-offline-tts` for Android arm64-v8a (the earlier Android build only produced
+   the JNI `.so`, not a standalone executable — needed `SHERPA_ONNX_ENABLE_BINARY=ON`; also hit and
+   fixed a pre-existing, ZeroTTS-unrelated NDK link error, see
+   `notes/environment-android-executable-link-fix.md`). Pushed the binary + `libonnxruntime.so` +
+   the **approved mixed-precision** model set (int8 `text_encoder`/`prefix_step`/both codec
+   decoders, fp32 `local_frame_decode`) to the device via `adb push`, ran real synthesis over
+   `adb shell` for 2 voices/sentences, pulled the resulting `.wav` files back
+   (`assets/zerotts/device_verification/`, gitignored — not committed, same as other generated
+   audio). Both are valid 48kHz mono WAVs matching the on-device-reported duration exactly
+   (145920/261120 samples ÷ 48000 = 3.04s/5.44s), non-silent, non-clipping (peak 0.73/0.96, RMS
+   0.13/0.11, 0% samples clipped — automated proxy, no playback available, same caveat as item 3
+   below). **Measured on-device RTF (single-threaded, this specific Pixel 6 Pro): 1.30 and 1.36**
+   (slower than real-time) — this is the first real Android-target performance number; it had not
+   been measured anywhere before this. Remaining gap: only the standalone CLI binary was exercised
+   over `adb shell`, not the JNI/app-embedded path a real Android app would use, and only
+   single-threaded — multi-threaded RTF and JNI-path integration are still unverified.
 3. **Manual listening gap** (Phases 4/6/10 §7) — no audio playback was available in this session.
    All "manual spot-check" steps in spec.md §11/§10 were substituted with automated proxies (RMS/
    peak sanity, spectrogram correlation, exact-integer sampling checks) and explicitly flagged

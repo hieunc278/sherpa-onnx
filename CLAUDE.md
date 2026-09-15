@@ -64,6 +64,15 @@ Android/AAOS build (plan.md Phase 8 onward), via the repo's existing NDK scripts
 ./build-android-arm64-v8a.sh
 ```
 
+- This only builds `libsherpa-onnx-jni.so` by default. For a standalone executable runnable via
+  `adb shell` (e.g. `sherpa-onnx-offline-tts`), set `SHERPA_ONNX_ENABLE_BINARY=ON` first.
+- **Known environment issue:** with `SHERPA_ONNX_ENABLE_BINARY=ON`, executables (not the JNI `.so`)
+  fail to link against this sandbox's prebuilt onnxruntime.so with `--no-allow-shlib-undefined`
+  errors (`__fwrite_chk`, `stderr`, etc.) — pre-existing, reproduces with stock upstream binaries,
+  unrelated to ZeroTTS. Fix: `cmake -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined" .` in
+  the build dir, then rebuild the target. See
+  `notes/environment-android-executable-link-fix.md`.
+
 ## Test
 
 ```bash

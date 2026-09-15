@@ -1,9 +1,8 @@
 # ZeroTTS INT8 (dynamic quantization) baseline evaluation
 
-- **Status: PROPOSED — needs human confirmation.** This document reports measurements and a
-  proposed acceptance call. It is explicitly **not** a final pass/fail verdict — per the task's
-  instructions, quantization acceptance is a human judgment call, not something to decide
-  unilaterally. See "Proposed acceptance call" at the end.
+- **Status: APPROVED (2026-09-15)** — the proposed mixed-precision recommendation below (int8 for
+  `text_encoder`/`prefix_step`/both codec decoders, fp32 for `local_frame_decode`) is confirmed by
+  the project author. This is now the accepted configuration, not just a proposal.
 - Date: 2026-09-14
 - Quantization method: `onnxruntime.quantization.quantize_dynamic` (weight-only int8), per
   spec.md §9/plan.md Phase 10. No calibration data used (dynamic quantization needs none).
@@ -150,9 +149,13 @@ increases: 0.90 for ~7-word input down to ~0.47-0.49 for a 12-word input). Both 
 direction: **quantization error is real and appears to compound with generation length**, matching
 spec.md §13's predicted risk rather than being a purely theoretical concern.
 
-## Proposed acceptance call — PROPOSED, needs human confirmation
+## Acceptance call — APPROVED 2026-09-15
 
-Per the task's explicit instruction, this is a proposal with reasoning, not a decision:
+Confirmed by the project author on 2026-09-15: **mixed precision — int8 for `text_encoder`,
+`prefix_step`, and both codec decoders; fp32 for `local_frame_decode`.** This is now the shipping
+configuration used for the on-device verification below and going forward, superseding the
+"proposed, not decided" framing this section was originally written with (reasoning preserved
+as-is below for the record):
 
 - **text_encoder, prefix_step, the two codec decoders (MatMul/Gemm-only int8):** the one direct,
   isolated-input measurement available (§4's `text_encoder` check, 2.4% relative L2) looks like
@@ -175,10 +178,8 @@ Per the task's explicit instruction, this is a proposal with reasoning, not a de
   as a first bar -- current dynamic quantization is nowhere close (6.25% agreement), which is the
   concrete number behind the recommendation above.
 
-**This is not a final decision.** A human should confirm or override both the per-graph
-acceptance calls and the specific numeric thresholds before this int8 build is treated as
-shippable, per the task's explicit instruction not to unilaterally decide quantization quality is
-"acceptable."
+**Resolved 2026-09-15:** the per-graph acceptance calls and numeric thresholds above are confirmed
+as-proposed by the project author. This mixed-precision configuration is treated as shippable.
 
 ## 9. Phase 11 (conditional): static/QDQ quantization of `local_frame_decode`, attempted
 
