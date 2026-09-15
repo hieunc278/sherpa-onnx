@@ -57,7 +57,10 @@ what actually happened).
   highest-risk code in this feature — exists exactly once). Proof test
   (`offline-tts-zerotts-streaming-test.cc`) holds a real 12-frame code sequence fixed and confirms
   chunked (`codec_decode_step`) and whole-shot (`codec_decode_full`) decoding of the *same* codes
-  agree (energy/length checks) — passes.
+  agree (energy/length checks) — passes. **Update 2026-09-15:** this had only ever been exercised
+  by that unit test — no CLI or device had actually called `GenerateStreaming` until a follow-up
+  session added a `--streaming` CLI flag and ran it for real, including on the Android device from
+  Phase 8. See open item 3 below for the real time-to-first-chunk numbers this produced.
 
 ### Done, but the result is a judgment call for a human, not a pass/fail I'm asserting
 
@@ -100,19 +103,39 @@ what actually happened).
    been measured anywhere before this. Remaining gap: only the standalone CLI binary was exercised
    over `adb shell`, not the JNI/app-embedded path a real Android app would use, and only
    single-threaded — multi-threaded RTF and JNI-path integration are still unverified.
-3. **Manual listening gap** (Phases 4/6/10 §7) — no audio playback was available in this session.
-   All "manual spot-check" steps in spec.md §11/§10 were substituted with automated proxies (RMS/
-   peak sanity, spectrogram correlation, exact-integer sampling checks) and explicitly flagged
-   rather than silently asserted as "sounds fine." A human should actually listen to a sample
-   across voices/variants before shipping.
-4. **Environment quirks worth knowing about** (both documented in `notes/`, not open questions,
-   but worth a human's awareness): (a) this environment's onnxruntime static-lib build crashes on
+3. **Streaming (Phase 9) actually exercised end-to-end — DONE (2026-09-15).** Until this point,
+   `GenerateStreaming` had only ever been called from a unit test on desktop; the CLI binary always
+   used the offline `Generate()` path (verified by reading `sherpa-onnx-offline-tts.cc` directly —
+   it's what item 2 above actually ran, not streaming, despite the task originally asking about
+   "truly streaming"). Added a `--streaming` flag to `sherpa-onnx-offline-tts.cc` (errors clearly
+   if the loaded model doesn't support it via `SupportsStreaming()`; measures and prints
+   time-to-first-chunk in addition to the usual RTF; purely additive, no other model's behavior
+   changes) and a ZeroTTS usage example in the CLI's `--help` text (previously missing — every
+   other model had one). Sanity-checked on desktop first (fp32, 5 chunks, 225ms
+   time-to-first-chunk), then rebuilt for Android and ran on the same Pixel 6 Pro with the approved
+   mixed-precision model set: **6 chunks, time-to-first-chunk = 186ms** (vs. ZeroTTS's own ~70ms
+   reference figure — real, meaningfully slower, not close; likely single-thread ORT session
+   overhead on this specific device, unverified whether multi-threading or a warm/pre-loaded
+   session would close the gap). Output pulled to
+   `assets/zerotts/device_verification/out_maichi_streaming_device.wav` (gitignored) — valid 48kHz
+   mono, non-silent, non-clipping, duration matches sample count exactly.
+4. **Manual listening gap — partially resolved.** The project author listened to the offline-mode
+   device outputs (item 2) and confirmed they sound correct. The streaming-mode output (item 3)
+   has not been listened to yet — still only automated proxy checks (peak/RMS/clipping) for that
+   one. The broader Phase 4/6/10 desktop outputs referenced in spec.md §11/§10 are also still
+   unlistened-to beyond the two device samples above.
+5. **Environment quirks worth knowing about** (documented in `notes/`, not open questions, but
+   worth a human's awareness): (a) this environment's onnxruntime static-lib build crashes on
    *any* TTS model (not a ZeroTTS bug) — use `-DBUILD_SHARED_LIBS=ON` for CLI-based work here; (b)
    `ONNXRUNTIME_DIR`/`SHERPA_ONNXRUNTIME_{LIB,INCLUDE}_DIR`/`SHERPA_ONNX_ENABLE_QNN` are pre-set in
    the shell environment pointing at a different project's Android arm64-v8a onnxruntime — correct
    for the Android build script, wrong for desktop builds (which must `env -u` them; see
-   `notes/environment-onnxruntime-static-lib-crash.md`).
-5. No other open questions were left unresolved during the run; nothing was silently skipped
+   `notes/environment-onnxruntime-static-lib-crash.md`); (c) this environment's prebuilt Android
+   onnxruntime.so fails to link into standalone executables (not the JNI `.so`) under this NDK's
+   default strict-undefined-symbol linking — fixed via
+   `-DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined"`, see
+   `notes/environment-android-executable-link-fix.md`.
+6. No other open questions were left unresolved during the run; nothing was silently skipped
    without a note explaining what and why.
 
 ## How to read this plan

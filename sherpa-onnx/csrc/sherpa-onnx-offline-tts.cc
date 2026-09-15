@@ -90,6 +90,26 @@ wget https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/voco
  --output-filename=./generated-zipvoice.wav \
  "小米的价值观是真诚, 热爱. 真诚，就是不欺人也不自欺. 热爱, 就是全心投入并享受其中."
 
+ZeroTTS (Vietnamese zero-shot TTS):
+
+./bin/sherpa-onnx-offline-tts \
+ --zerotts-text-encoder=./zerotts/onnx/text_encoder.int8.onnx \
+ --zerotts-prefix-step=./zerotts/onnx/prefix_step.int8.onnx \
+ --zerotts-local-frame-decode=./zerotts/onnx/local_frame_decode.onnx \
+ --zerotts-codec-decode-full=./zerotts/onnx/codec/moss_audio_tokenizer_decode_full.int8.onnx \
+ --zerotts-codec-decode-step=./zerotts/onnx/codec/moss_audio_tokenizer_decode_step.int8.onnx \
+ --zerotts-codec-meta=./zerotts/onnx/codec/codec_browser_onnx_meta.json \
+ --zerotts-tokenizer=./zerotts/tokenizer.json \
+ --zerotts-null-voice-emb=./zerotts/null_voice_emb.npy \
+ --zerotts-silence-frame=./zerotts/silence_frame.npy \
+ --zerotts-voice=./zerotts/voices/maichi \
+ --output-filename=./generated-zerotts.wav \
+ "Xin chào, đây là ZeroTTS."
+
+Add --streaming=true to the same command for true intra-utterance streaming
+synthesis (prints time-to-first-chunk in addition to RTF). Only ZeroTTS supports
+this as of this writing; it errors out for models that don't.
+
 It will generate a file specified by --output-filename.
 
 You can find more models at
@@ -144,6 +164,15 @@ or details.
   po.Register("speed", &gen_config.speed,
               "Speech speed. Larger=faster. Used by Supertonic, VITS, etc. "
               "(float, default = 1.0)");
+
+  bool streaming = false;
+  po.Register(
+      "streaming", &streaming,
+      "If true, use true intra-utterance streaming synthesis (only "
+      "supported by models that opt in, e.g. ZeroTTS -- see "
+      "OfflineTts::SupportsStreaming()/GenerateStreaming() in "
+      "offline-tts.h). Prints time-to-first-chunk in addition to the usual "
+      "RTF. Error if the loaded model doesn't support it.");
 
   sherpa_onnx::OfflineTtsConfig config;
 
@@ -220,6 +249,83 @@ or details.
       SHERPA_ONNX_EXIT(EXIT_FAILURE);
     }
     gen_config.reference_text = reference_text;
+  }
+
+  if (streaming) {
+    if (!tts.SupportsStreaming()) {
+      fprintf(stderr,
+              "Error: --streaming was requested, but this model does not "
+              "support true intra-utterance streaming (SupportsStreaming() "
+              "returned false).\n");
+      SHERPA_ONNX_EXIT(EXIT_FAILURE);
+    }
+
+    std::vector<float> all_samples;
+    int32_t sample_rate = 0;
+    int32_t chunk_count = 0;
+    bool got_first_chunk = false;
+    std::chrono::steady_clock::time_point first_chunk_time;
+
+    auto streaming_callback = [&](const float *samples, int32_t n,
+                                  int32_t sr) -> int32_t {
+      if (!got_first_chunk) {
+        first_chunk_time = std::chrono::steady_clock::now();
+        got_first_chunk = true;
+      }
+      sample_rate = sr;
+      chunk_count += 1;
+      all_samples.insert(all_samples.end(), samples, samples + n);
+      return 1;
+    };
+
+    tts.GenerateStreaming(po.GetArg(1), gen_config, streaming_callback);
+
+    const auto end = std::chrono::steady_clock::now();
+
+    if (all_samples.empty()) {
+      fprintf(stderr,
+              "Error in streaming generation. Please read previous error "
+              "messages.\n");
+      SHERPA_ONNX_EXIT(EXIT_FAILURE);
+    }
+
+    float time_to_first_chunk =
+        got_first_chunk
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                  first_chunk_time - begin)
+                      .count() /
+                  1000.f
+            : -1.f;
+    float elapsed_seconds =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - begin)
+            .count() /
+        1000.f;
+    float duration = all_samples.size() / static_cast<float>(sample_rate);
+    float rtf = elapsed_seconds / duration;
+
+    fprintf(stderr, "[streaming] Number of threads: %d\n",
+            config.model.num_threads);
+    fprintf(stderr, "[streaming] Number of chunks: %d\n", chunk_count);
+    fprintf(stderr, "[streaming] Time to first chunk: %.3f s\n",
+            time_to_first_chunk);
+    fprintf(stderr, "[streaming] Elapsed seconds: %.3f s\n", elapsed_seconds);
+    fprintf(stderr, "[streaming] Audio duration: %.3f s\n", duration);
+    fprintf(stderr, "[streaming] Real-time factor (RTF): %.3f/%.3f = %.3f\n",
+            elapsed_seconds, duration, rtf);
+
+    bool ok = sherpa_onnx::WriteWave(output_filename, sample_rate,
+                                     all_samples.data(), all_samples.size());
+    if (!ok) {
+      fprintf(stderr, "Failed to write wave to %s\n", output_filename.c_str());
+      SHERPA_ONNX_EXIT(EXIT_FAILURE);
+    }
+
+    fprintf(stderr, "The text is: %s. Speaker ID: %d\n", po.GetArg(1).c_str(),
+            sid);
+    fprintf(stderr, "Saved to %s successfully! (streaming)\n",
+            output_filename.c_str());
+
+    return 0;
   }
 
   audio = tts.Generate(po.GetArg(1), gen_config, AudioCallback);
